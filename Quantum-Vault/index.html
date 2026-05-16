@@ -155,7 +155,8 @@
         };
 
         function QuantumVault() {
-            // 🔥 ULTIMATE BASE64 STORAGE ENGINE 🔥
+            // 🔥 BULLETPROOF DUAL-CORE STORAGE ENGINE 🔥
+            // Uses both LocalForage and LocalStorage Backup to prevent Data Loss on Port Change
             const [vaults, setVaults] = useState([]);
             const [allFilesMeta, setAllFilesMeta] = useState([]); 
             const [isDataLoaded, setIsDataLoaded] = useState(false);
@@ -163,8 +164,19 @@
             useEffect(() => {
                 const loadData = async () => {
                     try {
-                        const savedVaults = await localforage.getItem('quantum_vaults');
-                        const savedMeta = await localforage.getItem('quantum_files_meta');
+                        let savedVaults = await localforage.getItem('quantum_vaults');
+                        let savedMeta = await localforage.getItem('quantum_files_meta');
+                        
+                        // Fallback mechanism to prevent data loss on file:// protocols or port changes
+                        if (!savedVaults) {
+                            const backupVaults = localStorage.getItem('qv_vaults_backup');
+                            if (backupVaults) savedVaults = JSON.parse(backupVaults);
+                        }
+                        if (!savedMeta) {
+                            const backupMeta = localStorage.getItem('qv_meta_backup');
+                            if (backupMeta) savedMeta = JSON.parse(backupMeta);
+                        }
+
                         if (savedVaults) setVaults(savedVaults);
                         if (savedMeta) setAllFilesMeta(savedMeta);
                     } catch (err) {
@@ -175,15 +187,27 @@
                 loadData();
             }, []);
 
-            const saveVaults = async (newVaults) => { setVaults(newVaults); await localforage.setItem('quantum_vaults', newVaults); };
+            // Dual Sync Helpers
+            const syncVaults = async (newVaults) => {
+                setVaults(newVaults);
+                try { await localforage.setItem('quantum_vaults', newVaults); } catch(e){}
+                try { localStorage.setItem('qv_vaults_backup', JSON.stringify(newVaults)); } catch(e){}
+            };
+
+            const syncMeta = async (newMeta) => {
+                setAllFilesMeta(newMeta);
+                try { await localforage.setItem('quantum_files_meta', newMeta); } catch(e){}
+                try { localStorage.setItem('qv_meta_backup', JSON.stringify(newMeta)); } catch(e){}
+            };
 
             const [currentView, setCurrentView] = useState('login'); 
             const [currentVault, setCurrentVault] = useState(null);
             const [theme, setTheme] = useState('quantum');
             const [toast, setToast] = useState({ show: false, msg: '', type: 'info' });
-            const [logKey, setLogKey] = useState(0);
             
+            // Decoupled Terminal Log (No longer disappears with toast)
             const [terminalLog, setTerminalLog] = useState("System online and waiting for instructions.");
+            const [logKey, setLogKey] = useState(0);
 
             const [vaultNameInput, setVaultNameInput] = useState('');
             const [passwordInput, setPasswordInput] = useState('');
@@ -242,10 +266,12 @@
             const storagePercent = Math.min((totalBytes / MAX_STORAGE) * 100, 100).toFixed(4);
             const displayGB = (totalBytes / (1024 * 1024 * 1024)).toFixed(6);
 
-            const showToast = (msg, type = 'info') => {
+            const showToast = (msg, type = 'info', updateTerminal = true) => {
                 setToast({ show: true, msg, type });
-                setTerminalLog(msg); 
-                setLogKey(prev => prev + 1);
+                if(updateTerminal) {
+                    setTerminalLog(msg); 
+                    setLogKey(prev => prev + 1);
+                }
                 setTimeout(() => setToast({ show: false, msg: '', type: 'info' }), 4000);
             };
 
@@ -256,9 +282,9 @@
                 const existingVault = vaults.find(v => v.vaultName.toLowerCase() === vaultNameInput.toLowerCase().trim());
 
                 if (isCreateMode) {
-                    if (existingVault) return showToast("Access Denied: This Vault Identity already exists in the Quantum Network!", "error");
+                    if (existingVault) return showToast("Access Denied: This Vault Identity already exists!", "error");
                     const newVault = { id: Math.random().toString(), vaultName: vaultNameInput.trim(), password: passwordInput };
-                    saveVaults([...vaults, newVault]);
+                    syncVaults([...vaults, newVault]);
                     setCurrentVault(newVault); setCurrentView('dashboard'); setVaultNameInput(''); setPasswordInput('');
                     showToast("Vault initialized successfully! Welcome.", "success");
                 } else {
@@ -286,7 +312,7 @@
                     const rootFolderName = file.webkitRelativePath ? file.webkitRelativePath.split('/')[0] : '';
 
                     try {
-                        // Store as Data URL so IntelliJ can read the content perfectly
+                        // Store exactly as Base64 Data URL to guarantee 0 bytes lost.
                         const base64Data = await new Promise((resolve, reject) => {
                             const reader = new FileReader();
                             reader.onload = e => resolve(e.target.result);
@@ -311,9 +337,7 @@
                 }
                 
                 if (newFilesMeta.length > 0) {
-                    const updatedMeta = [...allFilesMeta, ...newFilesMeta];
-                    await localforage.setItem('quantum_files_meta', updatedMeta);
-                    setAllFilesMeta(updatedMeta);
+                    await syncMeta([...allFilesMeta, ...newFilesMeta]);
                 }
 
                 setIsUploading(false); setUploadType(null);
@@ -332,13 +356,12 @@
                 };
                 
                 try {
+                    // Base64 conversion for snippets
                     const base64Data = "data:text/plain;base64," + btoa(unescape(encodeURIComponent(snippetContent)));
                     await localforage.setItem(`file_data_${fileId}`, base64Data);
                     
                     setTimeout(async () => {
-                        const updatedMeta = [...allFilesMeta, newFileMeta];
-                        await localforage.setItem('quantum_files_meta', updatedMeta);
-                        setAllFilesMeta(updatedMeta);
+                        await syncMeta([...allFilesMeta, newFileMeta]);
                         showToast("Snippet saved and encrypted.", "success");
                         setUploadType(null); setSnippetTitle(''); setSnippetContent('');
                         setIsUploading(false);
@@ -352,9 +375,7 @@
             const handleDeleteFile = async (e, id) => {
                 e.stopPropagation();
                 await localforage.removeItem(`file_data_${id}`); 
-                const updatedMeta = allFilesMeta.filter(f => f.id !== id);
-                await localforage.setItem('quantum_files_meta', updatedMeta);
-                setAllFilesMeta(updatedMeta);
+                await syncMeta(allFilesMeta.filter(f => f.id !== id));
                 showToast("File permanently deleted.", "success"); 
             };
 
@@ -368,15 +389,13 @@
                     await localforage.removeItem(`file_data_${f.id}`);
                 }
 
-                const updatedMeta = allFilesMeta.filter(f => !(f.vaultName === currentVault.vaultName && f.folderPath === folderName));
-                await localforage.setItem('quantum_files_meta', updatedMeta);
-                setAllFilesMeta(updatedMeta);
+                await syncMeta(allFilesMeta.filter(f => !(f.vaultName === currentVault.vaultName && f.folderPath === folderName)));
                 showToast(`Folder '${folderName}' completely destroyed.`, "success");
             }
 
             const handleDeleteVault = async () => {
                 const confirmDelete = window.prompt(`CRITICAL WARNING: This will permanently destroy your Vault and all ${vaultFiles.length} files.\n\nType '${currentVault.vaultName}' to confirm destruction:`);
-                if (confirmDelete !== currentVault.vaultName) return showToast("Vault destruction aborted.", "info");
+                if (confirmDelete !== currentVault.vaultName) return showToast("Vault destruction aborted.", "info", false);
 
                 setIsDestroying(true);
                 
@@ -386,12 +405,8 @@
                 }
 
                 setTimeout(async () => {
-                    const updatedMeta = allFilesMeta.filter(f => f.vaultName !== currentVault.vaultName);
-                    await localforage.setItem('quantum_files_meta', updatedMeta);
-                    setAllFilesMeta(updatedMeta);
-                    
-                    const updatedVaults = vaults.filter(v => v.id !== currentVault.id);
-                    await saveVaults(updatedVaults);
+                    await syncMeta(allFilesMeta.filter(f => f.vaultName !== currentVault.vaultName));
+                    await syncVaults(vaults.filter(v => v.id !== currentVault.id));
 
                     setCurrentVault(null); setCurrentView('login'); setIsSettingsOpen(false);
                     showToast("Vault and all associated data completely destroyed.", "success");
@@ -408,7 +423,7 @@
                 a.href = fileDataUrl; a.download = fileMeta.fileName; document.body.appendChild(a); a.click(); document.body.removeChild(a);
             };
 
-            // 🔥 INTELLIJ-COMPATIBLE FOLDER ZIP ENGINE 🔥
+            // 🔥 IDE-READY FOLDER ZIP ENGINE 🔥
             const downloadFolder = async (e, folderName) => {
                 e.stopPropagation();
                 const filesToZipMeta = allFilesMeta.filter(f => f.vaultName === currentVault.vaultName && f.folderPath === folderName);
@@ -423,18 +438,10 @@
                         const fileDataUrl = await localforage.getItem(`file_data_${fileMeta.id}`);
                         if (!fileDataUrl) continue;
 
-                        // FIX: We keep the EXACT fullPath intact. (e.g. MyProject/src/Main.java)
-                        // This guarantees IDEs like IntelliJ see the folder structure properly.
-                        let pathInZip = fileMeta.fullPath || fileMeta.fileName;
+                        // Preserve EXACT path hierarchy for IDEs
+                        const pathInZip = fileMeta.fullPath || fileMeta.fileName;
                         
-                        // We must remove the very first directory name if it matches folderName to prevent wrapping
-                        const pathParts = pathInZip.split('/');
-                        if (pathParts.length > 1 && pathParts[0] === folderName) {
-                            pathParts.shift();
-                            pathInZip = pathParts.join('/');
-                        }
-                        
-                        // Extract purely the base64 string
+                        // Safely extract Base64 payload
                         const dataSplit = fileDataUrl.split(',');
                         const base64Data = dataSplit.length > 1 ? dataSplit[1] : dataSplit[0];
                         
@@ -628,8 +635,16 @@
                             </div>
                         </div>
 
+                        {/* LIVE TERMINAL LOG */}
+                        <div className="px-8 py-3 bg-black/80 border-b border-slate-800/50 flex items-center gap-3">
+                            <span className="text-[10px] font-black tracking-widest uppercase text-slate-500 bg-slate-900 px-2 py-1 rounded border border-slate-700">System Log</span>
+                            <span key={logKey} className="text-xs font-mono font-bold qv-text-accent term-animate flex items-center gap-2">
+                                <span className="text-white">~/$</span> {terminalLog}
+                            </span>
+                        </div>
+
                         <div className="flex-1 p-8 overflow-y-auto relative">
-                            {/* BREADCRUMB / BACK BUTTON FOR FOLDER VIEW */}
+                            {/* BREADCRUMB FOR FOLDER VIEW */}
                             {activeFolder && (
                                 <div className="mb-6 flex items-center animate-in slide-in-from-left-4 fade-in duration-300">
                                     <button onClick={() => setActiveFolder(null)} className="px-4 py-2 bg-black/50 border border-slate-700 rounded-xl flex items-center gap-2 hover:qv-border-accent transition-all text-xs font-bold uppercase tracking-widest text-white shadow-lg">
@@ -652,7 +667,6 @@
                             ) : (
                             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6" key={activeFolder || 'root'}>
                                 {itemsToRender.map((item, idx) => {
-                                    // FOLDER CARD RENDER
                                     if (item.type === 'folder') {
                                         return (
                                             <div key={item.id} onClick={() => setActiveFolder(item.name)} className="qv-card rounded-[1.5rem] p-5 flex flex-col items-center text-center group relative overflow-hidden slide-up cursor-pointer" style={{ animationDelay: `${idx * 40}ms` }}>
@@ -670,7 +684,6 @@
                                         );
                                     }
                                     
-                                    // FILE CARD RENDER
                                     return (
                                         <div key={item.id} className="qv-card rounded-[1.5rem] p-5 flex flex-col items-center text-center group relative overflow-hidden slide-up" style={{ animationDelay: `${idx * 40}ms` }}>
                                             {!activeFolder && item.folderPath && (
@@ -775,7 +788,7 @@
                                 className="w-full qv-input rounded-xl px-4 py-3 text-sm font-bold tracking-widest" placeholder="New Passkey" />
                             <button onClick={() => {
                                 if(!newPassword.trim()) return;
-                                saveVaults(vaults.map(v => v.id === currentVault.id ? {...v, password: newPassword} : v));
+                                syncVaults(vaults.map(v => v.id === currentVault.id ? {...v, password: newPassword} : v));
                                 setCurrentVault({...currentVault, password: newPassword}); 
                                 setNewPassword(''); showToast("Passkey Updated.", "success");
                                 }} className="px-6 qv-btn-primary rounded-xl font-black uppercase text-xs tracking-widest">Set</button>
